@@ -178,11 +178,46 @@ impl CPU {
                     }
                 }
             }
-            TOp::Mul => {
-                self.binop(dten, srcs, |a, b| a * b);
+            TOp::MaxReduce { dim } => {
+                assert_eq!(*dim, B);
+                assert_ne!(dten, g[dten].sc[0]);
+
+                let sten = g[dten].sc[0];
+
+                let [dst, src] = self.bufs.get_many_mut([dten, sten]).unwrap();
+                let product = prod2(&g[sten].sh[B + 1..]);
+                for i in 0..product {
+                    dst.buf[i] = src.buf[i];
+                }
+
+                for batch in 1..(g[sten].sh[B]) {
+                    for i in 0..product {
+                        dst.buf[i] = f32::max(src.buf[i], src.buf[batch * product + i]);
+                    }
+                }
             }
-            TOp::Add => {
-                self.binop(dten, srcs, |a, b| a + b);
+            TOp::Prod => {
+                if srcs.len() == 2 {
+                    self.binop(dten, srcs, |a, b| a * b);
+                } else {
+                    panic!()
+                    // self[dten].buf.iter_mut().for_each(|v| *v = 1.0);
+                    //
+                    // for s in srcs {
+                    //     self.inop(dten, *s, |d, s| *d *= s);
+                    // }
+                }
+            }
+            TOp::Sum => {
+                if srcs.len() == 2 {
+                    self.binop(dten, srcs, |a, b| a + b);
+                } else {
+                    self[dten].buf.iter_mut().for_each(|v| *v = 0.0);
+
+                    for s in srcs {
+                        self.inop(dten, *s, |d, s| *d += s);
+                    }
+                }
             }
 
             TOp::MatMul => {
@@ -224,14 +259,15 @@ impl CPU {
                     );
                 }
             }
-            TOp::SumGrad => {
-                for s in srcs {
-                    self.inop(dten, *s, |d, s| *d += s);
-                }
-                let mut dst = &mut self[dten].buf;
-                let range = (dst.len() as f32).sqrt();
-                dst.iter_mut().for_each(|v| *v = f32::clamp(*v, -range, range));
-            }
+
+            // TOp::SumGrad => {
+            //     for s in srcs {
+            //         self.inop(dten, *s, |d, s| *d += s);
+            //     }
+            //     let mut dst = &mut self[dten].buf;
+            //     let range = (dst.len() as f32).sqrt();
+            //     dst.iter_mut().for_each(|v| *v = f32::clamp(*v, -range, range));
+            // }
             op => unimplemented!("{:?}", op),
         }
     }

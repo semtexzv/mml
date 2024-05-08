@@ -33,6 +33,15 @@ impl IndexMut<Tensor> for CGraph {
 }
 
 impl CGraph {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn find(&self, named: &str) -> Tensor {
+        Tensor {
+            id: self.ten.iter().enumerate().filter(|(i, d)| d.nm.as_deref() == Some(named)).next().unwrap().0
+        }
+    }
+
     pub fn scope<T>(&mut self, name: &str, fun: impl FnOnce(&mut Self) -> T) -> T {
         let plen = self.scp.len();
         self.scp.push_str(name);
@@ -111,7 +120,7 @@ impl CGraph {
         self[ten].grad = Some(grd);
 
         self[grd].is_back = true;
-        self[grd].op = TOp::SumGrad;
+        self[grd].op = TOp::Sum;
         self[grd].grad_for = Some(ten);
 
         grd
@@ -119,7 +128,7 @@ impl CGraph {
     pub fn add_grad(&mut self, t: Tensor, gdiff: Tensor) {
         let grad = self.grad_for(t);
         assert!(self[grad].is_back);
-        assert_eq!(self[grad].op, TOp::SumGrad);
+        assert_eq!(self[grad].op, TOp::Sum);
 
         self[grad].sc.push(gdiff);
     }
@@ -350,7 +359,7 @@ impl CGraph {
 
     pub fn add(&mut self, t1: Tensor, t2: Tensor) -> Tensor {
         let [t1, t2] = self.maybe_broadcast(B, t1, t2);
-        let out = self._binop(TOp::Add, t1, t2);
+        let out = self._binop(TOp::Sum, t1, t2);
 
         self.register_backwards_op(out, |g, out, outgrad| {
             for arg in g[out].sc.clone() {
@@ -367,7 +376,7 @@ impl CGraph {
 
     pub fn mul(&mut self, t1: Tensor, t2: Tensor) -> Tensor {
         let [t1, t2] = self.maybe_broadcast(B, t1, t2);
-        let out = self._binop(TOp::Mul, t1, t2);
+        let out = self._binop(TOp::Prod, t1, t2);
 
         self.register_backwards_op(out, |g, out, outgrad| {
             let srcs = g[out].sc.clone();
@@ -380,6 +389,7 @@ impl CGraph {
         });
         out
     }
+
     pub fn mul_scl(&mut self, t1: Tensor, scl: f32) -> Tensor {
         let t2 = self.ones_like(t1);
         self.mul(t1, t2)
