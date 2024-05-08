@@ -1,247 +1,179 @@
-use std::cell::UnsafeCell;
-use std::collections::HashMap;
-use std::fmt::{Debug, Formatter, Result};
-use std::mem::take;
-use std::ops::FnOnce;
-use std::option::Option;
-use std::option::Option::{None, Some};
-use std::string::String;
-use std::vec::Vec;
+#![feature(map_many_mut)]
+#![feature(get_many_mut)]
+#![feature(slice_ptr_get)]
 
-// #[repr(transparent)]
-// #[derive(Debug, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
+mod graph;
+mod tmap;
+mod eval;
+mod optim;
+
+use std::borrow::Borrow;
+use std::ops::{FnOnce, Index, IndexMut};
+use std::string::String;
+use rand::random;
+use smallvec::SmallVec;
+use crate::eval::CPU;
+use crate::graph::CGraph;
+use crate::optim::{Optimizer, SGD};
+
 type Shape = [usize; 4];
 
-#[derive(Debug)]
-enum TOp {
-    Const,
+fn prod(s: Shape) -> usize {
+    s.iter().product()
+}
 
+fn prod2(s: &[usize]) -> usize {
+    s.iter().product()
+}
+
+const B: usize = 0;
+const F: usize = 1;
+const H: usize = 2;
+const W: usize = 3;
+
+#[derive(Default, Debug, PartialEq, Clone, Copy)]
+enum VKind {
+    #[default]
+    Zero,
+    One,
+    Input,
+    Param,
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum TOp {
+    Value(VKind),
+
+    /// y = x^e
     Exp,
+    /// y = ln(x)
     Log,
+    /// y = -x
     Neg,
+    /// y = max(0, x)
+    Relu,
+    /// y = max(0, signum(x))
+    Gtz,
+    /// y = 1 / x
+    Recip,
+
+    Repeat { dim: usize, len: usize },
+    MaxReduce { dim: usize },
+    SumReduce { dim: usize },
 
     Add,
     Mul,
+
     MatMul,
+    MatMulT,
     Conv,
+
+    SumGrad,
 }
 
-#[derive(Debug)]
+impl Default for TOp {
+    fn default() -> Self {
+        TOp::Value(VKind::Zero)
+    }
+}
+
+
+#[derive(Debug, Default)]
 struct TData {
     nm: Option<String>,
     sh: Shape,
 
-    sc: Vec<Tensor>,
-
+    sc: SmallVec<Tensor, 2>,
     op: TOp,
+
+    // Whether this tensor needs gradient calculation
+    want_grad: bool,
+    // Whether this tensor is on the grad path
+    is_back: bool,
+
+    grad: Option<Tensor>,
+    grad_for: Option<Tensor>,
 }
 
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct Tensor {
     id: usize,
 }
 
-type BackOp = fn(g: &GraphBuilder, out: Tensor, grad: Tensor);
-
-#[derive(Default)]
-struct GraphBuilder {
-    is_back: UnsafeCell<bool>,
-    // Current scope
-    scp: UnsafeCell<String>,
-    // Tensor storage
-    ten: UnsafeCell<Vec<TData>>,
-    // Gradient mapping
-    grd: UnsafeCell<HashMap<Tensor, Tensor>>,
-    // Backpropagation ops for tensors
-    bck: UnsafeCell<HashMap<Tensor, BackOp>>,
-}
-
-impl Debug for GraphBuilder {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        f.debug_struct("GraphBuilder")
-            .field("ten", self.ten())
-            .field("grd", self.grd())
-            .field("bck", self.bck())
-            .finish()
+impl Borrow<usize> for Tensor {
+    fn borrow(&self) -> &usize {
+        &self.id
     }
 }
 
-impl GraphBuilder {
-    fn scp(&self) -> &mut String {
-        unsafe { &mut *self.scp.get() }
-    }
-    fn ten(&self) -> &mut Vec<TData> {
-        unsafe { &mut *self.ten.get() }
-    }
-    fn grd(&self) -> &mut HashMap<Tensor, Tensor> {
-        unsafe { &mut *self.grd.get() }
-    }
-    fn bck(&self) -> &mut HashMap<Tensor, BackOp> {
-        unsafe { &mut *self.bck.get() }
-    }
-    fn is_back(&self) -> bool {
-        unsafe { *self.is_back.get() }
-    }
-
-    fn tdata(&self, t: Tensor) -> &mut TData {
-        &mut self.ten()[t.id]
-    }
-
-    fn scope<T>(&self, name: &str, fun: impl FnOnce(&Self) -> T) -> T {
-        let plen = self.scp().len();
-        self.scp().push_str(name);
-        let ret = fun(self);
-        unsafe { self.scp().as_mut_vec().set_len(plen); }
-        ret
-    }
-
-    fn shape(&self, t: Tensor) -> Shape {
-        self.ten()[t.id].sh
-    }
-
-    fn input(&self, sh: Shape) -> Tensor {
-        let ten = self.ten();
-
-        ten.push(TData { nm: None, sh, sc: vec![], op: TOp::Const });
-        Tensor { id: ten.len() - 1 }
-    }
-
-    fn zeros(&self, sh: Shape) -> Tensor {
-        let ten = self.ten();
-
-        ten.push(TData { nm: None, sh, sc: vec![], op: TOp::Const });
-        Tensor { id: ten.len() - 1 }
-    }
-    fn zeros_like(&self, t: Tensor) -> Tensor {
-        let ten = self.ten();
-
-        ten.push(TData { nm: None, sh: ten[t.id].sh, sc: vec![], op: TOp::Const });
-        Tensor { id: ten.len() - 1 }
-    }
-    fn ones(&self, sh: Shape) -> Tensor {
-        let ten = self.ten();
-
-        ten.push(TData { nm: None, sh, sc: vec![], op: TOp::Const });
-        Tensor { id: ten.len() - 1 }
-    }
-
-    fn param(&self, name: &str, sh: Shape) -> Tensor {
-        let ten = self.ten();
-
-        let mut nm: String = self.scp().clone();
-        nm.push('.');
-        nm.push_str(name);
-
-        ten.push(TData { nm: Some(nm), sh, sc: vec![], op: TOp::Const });
-        Tensor { id: ten.len() - 1 }
-    }
-
-    fn backward(&self, ten: Tensor) {
-        unsafe { *self.is_back.get() = true; }
-        let bck = take(self.bck());
-
-        for (t, op) in bck {
-            op(self, t, *self.grd().entry(t).or_insert_with(|| self.zeros_like(t)));
-        }
-
-        unsafe { *self.is_back.get() = false; }
-    }
-    fn back_for(&self, t: Tensor, op: BackOp) {
-        if !self.is_back() {
-            assert!(self.bck().insert(t, op).is_none());
-        }
-    }
-
-    fn _unop(&self, op: TOp, t: Tensor) -> Tensor {
-        let ten = self.ten();
-
-        let t1d = &ten[t.id];
-
-        ten.push(TData {
-            nm: None,
-            sh: t1d.sh,
-            sc: vec![t],
-            op,
-        });
-
-        Tensor { id: ten.len() - 1 }
-    }
-
-    fn _binop(&self, op: TOp, t1: Tensor, t2: Tensor) -> Tensor {
-        let ten = self.ten();
-
-        let t1d = &ten[t1.id];
-        let t2d = &ten[t2.id];
-        // assert_is_broadcastable(t1d.sh, t2d.sh);
-        assert_eq!(t1d.sh, t2d.sh);
-
-        ten.push(TData {
-            nm: None,
-            sh: t1d.sh,
-            sc: vec![t1, t2],
-            op,
-        });
-
-        Tensor { id: ten.len() - 1 }
-    }
-    fn neg(&self, t: Tensor) -> Tensor {
-        self._unop(TOp::Neg, t)
-    }
-    fn exp(&self, t: Tensor) -> Tensor {
-        self._unop(TOp::Exp, t)
-    }
-    fn log(&self, t: Tensor) -> Tensor {
-        self._unop(TOp::Log, t)
-    }
-
-    fn add(&self, t1: Tensor, t2: Tensor) -> Tensor {
-        let out = self._binop(TOp::Add, t1, t2);
-        self.back_for(out, |g, out, grad| {
-            for arg in &g.tdata(out).sc {
-                let garg = g.grd().entry(*arg).or_insert_with(|| g.zeros_like(*arg));
-                *garg = g.add(*garg, grad);
-            }
-        });
-        out
-    }
-
-    fn mul(&self, t1: Tensor, t2: Tensor) -> Tensor {
-        let out = self._binop(TOp::Mul, t1, t2);
-        self.back_for(out, |g, out, grad| {
-            let srcs = &g.tdata(out).sc;
-            assert_eq!(srcs.len(), 2);
-
-            let ag0 = g.grd().entry(srcs[0]).or_insert_with(|| g.zeros_like(srcs[0]));
-            let ag1 = g.grd().entry(srcs[1]).or_insert_with(|| g.zeros_like(srcs[1]));
-
-            *ag0 = g.add(*ag1, srcs[1]);
-            *ag1 = g.add(*ag1, srcs[1]);
-
-        });
-        out
-    }
-
-    fn mul_mat(&self, t1: Tensor, t2: Tensor) -> Tensor {
-        self._binop(TOp::MatMul, t1, t2)
-    }
-}
-
-fn linear(g: &GraphBuilder, name: &str, x: Tensor) -> Tensor {
-    g.scope(name, |g| {
-        let w = g.param("weight", g.shape(x));
-        let b = g.param("bias", g.shape(x));
-
-        g.add(g.mul(x, w), b)
-    })
+fn target(x: f32) -> f32 {
+    32.0 * x + 10.0
 }
 
 fn main() {
-    let g = &GraphBuilder::default();
-    let a = g.zeros([1, 1, 1, 2]);
-    let b = g.zeros([1, 1, 1, 2]);
-    let c = linear(g, "lin", a);
-    let y = g.add(c, b);
+    const BATCH: usize = 32;
+    let g = &mut CGraph::default();
+    let e = &mut CPU::new();
+    let o = &mut SGD::new(0.001);
 
-    println!("graph: {g:#?}");
+
+    let a = g.input("t", [1, 1, 2, 2]);
+    let b = g.input("t", [1, 1, 2, 2]);
+    let xx = g.mul_mat(a, b);
+
+    e.set_value(g, a, &[2.0; 4]);
+    e.set_value(g, b, &[2.0; 4]);
+    e.evaluate(g, xx);
+
+    panic!("{:?}", e.get_value(xx));
+
+    let x = g.input("x", [BATCH, 1, 1, 1]);
+    let a = g.param("a", [1, 1, 1, 1]);
+    let b = g.param("b", [1, 1, 1, 1]);
+
+    let y1 = g.mul(a, x);
+    let y = g.add(y1, b);
+
+    let w = g.input("w", [BATCH, 1, 1, 1]);
+
+    let loss = g.sub(y, w);
+    let loss = g.mul(loss, loss);
+
+    let params = g.backward(loss);
+
+    let mut epoch = 0;
+    loop {
+        let samples: [f32; BATCH] = random();
+        e.step();
+        e.set_value(g, x, &samples);
+        e.set_value(g, w, &samples.map(|s| target(s)));
+        e.evaluate(g, loss);
+
+        for p in &params {
+            e.evaluate(g, *p);
+        }
+
+        o.optimize(g, e, &params);
+
+        println!("Epoch\t{:?}", epoch);
+        println!("Loss:\t{:?}", e.get_value(loss)[0]);
+        println!("P(a):\t{:?}", e.get_value(a));
+        println!("P(b):\t{:?}", e.get_value(b));
+
+        // sleep(Duration::from_millis(1));
+        epoch += 1;
+    }
+    // println!("{:?}", params);
+    // let mut e = Evaluator::default();
+    // e.set_value(g, x, vec![2.0; 1]);
+    // e.set_value(g, y, vec![1.0; 1]);
+    // e.evaluate(g, w);
+    // println!("{:#?}", e.get_value(w));
+
+    // let dot = g.to_dot();
+    // let dot = dot.to_string();
+    // std::fs::write("./graph.dot", &*dot).unwrap();
+    // let url = urlencoding::encode(&dot);
+    // open::that(format!("https://dreampuf.github.io/GraphvizOnline/#{url}"));
 }
