@@ -38,7 +38,6 @@ fn main() {
     let mut e = &mut eval::CPU::new();
     let mut o = &mut optim::SGD::new(g, 0.01);
 
-    let mut m = eval::MPS::new().unwrap();
     let [inp, out, loss] = model(g, BATCH);
 
     let a = g.find("a");

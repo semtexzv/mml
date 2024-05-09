@@ -1,6 +1,4 @@
 use metal::{Buffer, CommandQueue, Device, Library, MTLResourceOptions};
-use metal::mps::{Matrix, MPSMatrix};
-use objc::rc::autoreleasepool;
 use crate::graph::CGraph;
 use crate::{prod, Tensor, TOp};
 use crate::tmap::TensorMap;

@@ -217,6 +217,16 @@ impl CGraph {
 
         Tensor { id: self.ten.len() - 1 }
     }
+    pub fn maybe_broadcast_shape(&mut self, shape: Shape, mut t: Tensor) -> Tensor {
+        for dim in 0 .. 4 {
+            if self[t].sh[dim] == 1 && shape[dim] > 1 {
+                t = self._unop(TOp::Repeat { dim, len: shape[dim] }, t);
+            } else if self[t].sh[dim] > 1 && shape[dim] != self[t].sh[dim] {
+                panic!("Cant broadcast {} to {} (dim={})", self[t].sh[dim], shape[dim], dim);
+            }
+        }
+        return t
+    }
     pub fn maybe_broadcast(&mut self, dim: usize, mut t1: Tensor, mut t2: Tensor) -> [Tensor; 2] {
         let d1 = self[t1].sh[dim];
         let d2 = self[t2].sh[dim];

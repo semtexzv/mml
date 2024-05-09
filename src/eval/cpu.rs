@@ -133,8 +133,6 @@ impl CPU {
     }
 
     fn do_eval(&mut self, g: &CGraph, dten: Tensor, srcs: &[Tensor], op: TOp) {
-        // println!("{:?} {:?} {:?}", ten, srcs, op);
-
         if !self.bufs.has(dten) {
             self.bufs.set(dten, BData {
                 epoch: 0,
@@ -190,9 +188,9 @@ impl CPU {
                 let [dst, src] = self.bufs.get_many_mut([dten, sten]).unwrap();
                 let product = sprod(&g[sten].sh[B + 1..]);
                 for i in 0..product {
-                    dst.buf[i] = 0.0;
+                    dst.buf[i] = src.buf[i];
                 }
-                for batch in 0..(g[sten].sh[B]) {
+                for batch in 1..(g[sten].sh[B]) {
                     for i in 0..product {
                         dst.buf[i] += src.buf[batch * product + i];
                     }

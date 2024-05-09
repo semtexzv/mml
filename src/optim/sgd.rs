@@ -1,11 +1,8 @@
 use crate::eval::{CPU, Evaluator};
 use crate::graph::CGraph;
+use crate::optim::Optimizer;
 use crate::{Tensor, TOp, VKind};
 use crate::tmap::TensorMap;
-
-pub trait Optimizer {
-    fn optimize(&mut self, g: &mut CGraph, e: &mut CPU, parameters: &[Tensor]);
-}
 
 pub struct SGD {
     lr: f32,
@@ -36,7 +33,8 @@ impl Optimizer for SGD {
 
             if !self.next.has(*param) {
                 let grad = g[*param].grad.unwrap();
-                let chng = g.mul(self.lrt, grad);
+                let lrt = g.maybe_broadcast_shape(g[grad].sh, self.lrt);
+                let chng = g.mul(lrt, grad);
                 let next = g.add(*param, chng);
                 self.next.set(*param, next);
             }

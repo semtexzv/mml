@@ -8,11 +8,8 @@ mod data;
 use std::borrow::Borrow;
 use std::ops::{FnOnce, Index, IndexMut};
 use std::string::String;
-use rand::random;
 use smallvec::SmallVec;
-use crate::eval::CPU;
-use crate::graph::CGraph;
-use crate::optim::{Optimizer, SGD};
+use crate::optim::Optimizer;
 
 type Shape = [usize; 4];
 
