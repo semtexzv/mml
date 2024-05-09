@@ -1,0 +1,3 @@
+[submodule "dep/metal-rs"]
+	path = dep/metal-rs
+	url = git@github.com:semtexzv/metal-rs

@@ -1,22 +1,13 @@
-use std::ops::{Index, IndexMut};
-use cblas::{Layout, Transpose};
-use rand::prelude::Distribution;
-use crate::graph::CGraph;
-use crate::{B, F, H, prod, prod2, Tensor, TOp, VKind, W};
-use crate::tmap::TensorMap;
-
-pub trait Evaluator {
-    /// Set a tensor to certain value
-    fn set_value(&mut self, g: &CGraph, t: Tensor, v: &[f32]);
-    /// Get the tensor buffer
-    fn get_value(&mut self, g: &CGraph, t: Tensor) -> &[f32];
-    /// Force-evaluate a tensor (blocking).
-    fn evaluate(&mut self, g: &CGraph, t: Tensor);
-    /// Low level apply operator. Apply operation directly.
-    fn apply(&mut self, g: &CGraph, t: Tensor, srcs: &[Tensor], op: TOp);
-}
 
 // TODO, how to ensure buffer safety
+
+use std::ops::{Index, IndexMut};
+use cblas::{Layout, Transpose};
+use rand::distributions::Distribution;
+use crate::graph::CGraph;
+use crate::{B, F, H, prod, sprod, Tensor, TOp, VKind, W};
+use crate::eval::Evaluator;
+use crate::tmap::TensorMap;
 
 #[derive(Debug)]
 pub struct BData {
@@ -44,6 +35,52 @@ impl IndexMut<Tensor> for CPU {
     }
 }
 
+impl Evaluator for CPU {
+
+    fn step(&mut self) {
+        self.epoch += 1;
+    }
+    fn set_value(&mut self, g: &CGraph, ten: Tensor, val: &[f32]) {
+        assert_eq!(prod(g[ten].sh), val.len(), "provided data has wrong size");
+        let e = self.bufs.entry(ten)
+            .get_or_insert_with(|| BData {
+                epoch: self.epoch,
+                buf: vec![],
+            });
+        e.buf = val.to_vec();
+        e.epoch = self.epoch;
+    }
+    fn get_value(&self, ten: Tensor) -> &[f32] {
+        self.bufs.get(ten).unwrap().buf.as_slice()
+    }
+
+    fn evaluate(&mut self, g: &CGraph, ten: Tensor) {
+        if self.bufs.get(ten).map(|s| s.epoch).unwrap_or_default() == self.epoch {
+            return;
+        }
+
+        let srcs = g[ten].sc.clone();
+        for s in &srcs {
+            self.evaluate(g, *s);
+            self[*s].epoch = self.epoch;
+        }
+
+        self.do_eval(g, ten, &srcs, g[ten].op)
+    }
+
+    fn copy(&mut self, g: &CGraph, from: Tensor, to: Tensor) {
+        if !self.bufs.has(to) {
+            self.bufs.set(to, BData {
+                epoch: 0,
+                buf: vec![0.0; prod(g[to].sh)],
+            });
+        }
+        self[to].epoch = self.epoch;
+        let [from, to] = self.bufs.get_many_mut([from, to]).unwrap();
+        to.buf.iter_mut().zip(from.buf.iter()).for_each(|(d, s)| *d = *s);
+    }
+}
+
 impl CPU {
     pub fn new() -> Self {
         Self {
@@ -54,23 +91,6 @@ impl CPU {
 }
 
 impl CPU {
-    pub fn step(&mut self) {
-        self.epoch += 1;
-    }
-    pub fn set_value(&mut self, g: &CGraph, ten: Tensor, val: &[f32]) {
-        assert_eq!(prod(g[ten].sh), val.len(), "provided data has wrong size");
-        let e = self.bufs.entry(ten)
-            .get_or_insert_with(|| BData {
-                epoch: self.epoch,
-                buf: vec![],
-            });
-        e.buf = val.to_vec();
-        e.epoch = self.epoch;
-    }
-    pub fn get_value(&self, ten: Tensor) -> &[f32] {
-        self.bufs.get(ten).unwrap().buf.as_slice()
-    }
-
     fn perform_unop(d: &mut [f32], s: &[f32], op: fn(f32) -> f32) {
         for (d, s) in d.iter_mut().zip(s.iter()) {
             *d = op(*s);
@@ -112,7 +132,7 @@ impl CPU {
         Self::perform_inop(&mut dst.buf, &src.buf, op)
     }
 
-    pub fn do_eval(&mut self, g: &CGraph, dten: Tensor, srcs: &[Tensor], op: TOp) {
+    fn do_eval(&mut self, g: &CGraph, dten: Tensor, srcs: &[Tensor], op: TOp) {
         // println!("{:?} {:?} {:?}", ten, srcs, op);
 
         if !self.bufs.has(dten) {
@@ -156,7 +176,7 @@ impl CPU {
 
                 let [dst, src] = self.bufs.get_many_mut([dten, g[dten].sc[0]]).unwrap();
                 for batch in 0..(g[dten].sh[B]) {
-                    let product = prod2(&g[dten].sh[B + 1..]);
+                    let product = sprod(&g[dten].sh[B + 1..]);
                     for i in 0..product {
                         dst.buf[batch * product + i] = src.buf[i];
                     }
@@ -168,7 +188,7 @@ impl CPU {
                 let sten = g[dten].sc[0];
 
                 let [dst, src] = self.bufs.get_many_mut([dten, sten]).unwrap();
-                let product = prod2(&g[sten].sh[B + 1..]);
+                let product = sprod(&g[sten].sh[B + 1..]);
                 for i in 0..product {
                     dst.buf[i] = 0.0;
                 }
@@ -185,7 +205,7 @@ impl CPU {
                 let sten = g[dten].sc[0];
 
                 let [dst, src] = self.bufs.get_many_mut([dten, sten]).unwrap();
-                let product = prod2(&g[sten].sh[B + 1..]);
+                let product = sprod(&g[sten].sh[B + 1..]);
                 for i in 0..product {
                     dst.buf[i] = src.buf[i];
                 }
@@ -259,30 +279,8 @@ impl CPU {
                     );
                 }
             }
-
-            // TOp::SumGrad => {
-            //     for s in srcs {
-            //         self.inop(dten, *s, |d, s| *d += s);
-            //     }
-            //     let mut dst = &mut self[dten].buf;
-            //     let range = (dst.len() as f32).sqrt();
-            //     dst.iter_mut().for_each(|v| *v = f32::clamp(*v, -range, range));
-            // }
             op => unimplemented!("{:?}", op),
         }
     }
 
-    pub fn evaluate(&mut self, g: &mut CGraph, ten: Tensor) {
-        if self.bufs.get(ten).map(|s| s.epoch).unwrap_or_default() == self.epoch {
-            return;
-        }
-
-        let srcs = g[ten].sc.clone();
-        for s in &srcs {
-            self.evaluate(g, *s);
-            self[*s].epoch = self.epoch;
-        }
-
-        self.do_eval(g, ten, &srcs, g[ten].op)
-    }
 }

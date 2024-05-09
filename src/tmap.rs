@@ -104,7 +104,7 @@ impl<T> TensorMap<T> {
         unsafe {
             for i in 0..N {
                 let idx = *indices.get_unchecked(i);
-                *(*arr_ptr).get_unchecked_mut(i) = (&mut *slice.get_unchecked_mut(idx.id)).as_mut().unwrap();
+                *(*arr_ptr).get_mut(i).unwrap_unchecked() = ((&mut *slice).get_mut(idx.id).unwrap_unchecked()).as_mut().unwrap();
             }
             Some(arr.assume_init())
         }

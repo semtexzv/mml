@@ -1,6 +1,6 @@
-
 use rand::random;
 use mml::{graph, eval, optim, Tensor};
+use mml::eval::Evaluator;
 use mml::optim::Optimizer;
 
 /// Models a network expressing a * x + b
@@ -36,8 +36,9 @@ fn main() {
 
     let mut g = &mut graph::CGraph::new();
     let mut e = &mut eval::CPU::new();
-    let mut o = &mut optim::SGD::new(0.01);
+    let mut o = &mut optim::SGD::new(g, 0.01);
 
+    let mut m = eval::MPS::new().unwrap();
     let [inp, out, loss] = model(g, BATCH);
 
     let a = g.find("a");
@@ -63,12 +64,13 @@ fn main() {
         e.evaluate(g, loss);
         println!("Epoch\t{:?}", epoch);
         println!("Loss:\t{:?}", e.get_value(loss)[0]);
+        println!("Params:\t{:?} {:?}", e.get_value(a), e.get_value(b));
 
         e.evaluate(g, max_loss);
         if e.get_value(max_loss)[0] < 0.0000001 {
             println!("Seen:\t{} samples", epoch * BATCH);
             println!("Params:\t{:?} {:?}", e.get_value(a), e.get_value(b));
-            return;
+            break;
         }
         o.optimize(g, e, &params);
     }

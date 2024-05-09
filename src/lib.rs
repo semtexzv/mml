@@ -1,6 +1,3 @@
-#![feature(map_many_mut)]
-#![feature(get_many_mut)]
-#![feature(slice_ptr_get)]
 
 pub mod graph;
 pub (crate) mod tmap;
@@ -19,11 +16,11 @@ use crate::optim::{Optimizer, SGD};
 
 type Shape = [usize; 4];
 
-fn prod(s: Shape) -> usize {
+pub fn prod(s: Shape) -> usize {
     s.iter().product()
 }
 
-fn prod2(s: &[usize]) -> usize {
+pub fn sprod(s: &[usize]) -> usize {
     s.iter().product()
 }
 
@@ -33,7 +30,7 @@ pub const H: usize = 2;
 pub const W: usize = 3;
 
 #[derive(Default, Debug, PartialEq, Clone, Copy)]
-enum VKind {
+pub enum VKind {
     #[default]
     Zero,
     One,
@@ -42,7 +39,7 @@ enum VKind {
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
-enum TOp {
+pub enum TOp {
     Value(VKind),
     /// y = x^e
     Exp,
@@ -64,6 +61,12 @@ enum TOp {
     SumReduce { dim: usize },
     /// Concatenate tensors in `dim`, all other dims must be same
     Cat { dim: usize },
+    /// Select sub-range of the input tensor in some dimension
+    Slice {
+        dim: usize,
+        from: usize,
+        to: usize
+    },
     /// Element-wise addtion
     Sum,
     /// Element-wise multiplication
