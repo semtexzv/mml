@@ -1,6 +1,7 @@
 mod cpu;
-pub use cpu::CPU;
 
+use std::borrow::Cow;
+pub use cpu::CPU;
 
 #[cfg(feature = "mps")]
 mod mps;
@@ -8,16 +9,25 @@ mod mps;
 pub use mps::MPS;
 
 use crate::graph::CGraph;
-use crate::{Tensor, TOp};
+use crate::{TOp, Tensor};
 
+/// Core trait for performing actual computation.
+///
+/// Internally has to store tensor buffers, perform dependency tracking and invalidation,
+/// and correctly schedule tensor evaluation.
 pub trait Evaluator {
+    /// Step the internal counter. When doing this, all the tensors are invalidated
+    /// Typically you [Evalutator::step], then [Evalutator::write] the input/output tensors
+    /// and [Evalutator::eval] tensors you're interested in
     fn step(&mut self);
-    /// Set a tensor to certain value
-    fn set_value(&mut self, g: &CGraph, t: Tensor, v: &[f32]);
-    /// Get the tensor buffer
-    fn get_value(&self, t: Tensor) -> &[f32];
     /// Force-evaluate a tensor (blocking).
-    fn evaluate(&mut self, g: &CGraph, t: Tensor);
-    /// Copy values one tensor buffer to another. They must have same dimensions
+    fn eval(&mut self, g: &CGraph, t: Tensor);
+    /// Set a tensor to certain value. Marks tensor as valid for this step
+    fn write(&mut self, g: &CGraph, t: Tensor, v: &[f32]);
+    /// Get the tensor buffer.
+    fn read(&self, g: &CGraph, t: Tensor) -> Cow<[f32]>;
+    /// Copy values one tensor buffer to another. They must have same dimensions.
     fn copy(&mut self, g: &CGraph, from: Tensor, to: Tensor);
+    /// Zero-initialize gradients
+    fn zero_grad(&mut self, g: &CGraph, params: &[Tensor]);
 }

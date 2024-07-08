@@ -1,10 +1,13 @@
 mod sgd;
-pub use sgd::SGD;
+mod adam;
 
-use crate::eval::{CPU, Evaluator};
+pub use sgd::SGD;
+pub use adam::{Adam, AdamParams};
+
+use crate::eval::{Evaluator, CPU};
 use crate::graph::CGraph;
 use crate::Tensor;
 
 pub trait Optimizer {
-    fn optimize(&mut self, g: &mut CGraph, e: &mut CPU, parameters: &[Tensor]);
+    fn optimize<E: Evaluator>(&mut self, g: &mut CGraph, e: &mut E, parameters: &[Tensor]);
 }

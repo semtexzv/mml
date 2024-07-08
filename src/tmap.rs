@@ -1,7 +1,23 @@
+use std::borrow::Borrow;
 use std::fmt::{Debug, Formatter};
 use std::mem;
 use std::ops::{Index, IndexMut};
-use crate::Tensor;
+
+
+/// Tensor. This is just an index. All graph data is stored in [CGraph].
+/// All runtime data is stored in [Evaluator].
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Tensor {
+    pub(crate) id: usize,
+}
+
+impl Borrow<usize> for Tensor {
+    fn borrow(&self) -> &usize {
+        &self.id
+    }
+}
+
 
 pub struct TensorMap<T> {
     v: Vec<Option<T>>,
@@ -20,13 +36,17 @@ impl<T: Debug> Debug for TensorMap<T> {
 
 impl<T> Default for TensorMap<T> {
     fn default() -> Self {
-        Self { v: Default::default() }
+        Self {
+            v: Default::default(),
+        }
     }
 }
 
 impl<T> TensorMap<T> {
     pub fn new() -> Self {
-        Self { v: Default::default() }
+        Self {
+            v: Default::default(),
+        }
     }
     pub fn get(&self, t: Tensor) -> Option<&T> {
         if self.v.len() <= t.id {
@@ -50,7 +70,9 @@ impl<T> TensorMap<T> {
     }
     pub fn set(&mut self, t: Tensor, val: T) {
         self.res(t);
-        unsafe { *self.v.get_unchecked_mut(t.id) = Some(val); }
+        unsafe {
+            *self.v.get_unchecked_mut(t.id) = Some(val);
+        }
     }
     pub fn has(&self, t: Tensor) -> bool {
         if t.id >= self.v.len() {
@@ -59,21 +81,18 @@ impl<T> TensorMap<T> {
         self.v[t.id].is_some()
     }
 
-    pub fn del(&mut self, t: Tensor) {
-        if self.v.len() <= t.id {
-            return;
-        }
-        self.v[t.id] = None;
-    }
+    // pub fn del(&mut self, t: Tensor) {
+    //     if self.v.len() <= t.id {
+    //         return;
+    //     }
+    //     self.v[t.id] = None;
+    // }
     pub fn entry(&mut self, t: Tensor) -> &mut Option<T> {
         self.res(t);
         self.v.get_mut(t.id).expect("Resize should work")
     }
 
-    pub fn get_many_mut<const N: usize>(
-        &mut self,
-        indices: [Tensor; N],
-    ) -> Option<[&mut T; N]> {
+    pub fn get_many_mut<const N: usize>(&mut self, indices: [Tensor; N]) -> Option<[&mut T; N]> {
         for i in &indices {
             if self.v[i.id].is_none() {
                 panic!("TensorMap::get_many_mut: tensor not found")
@@ -104,7 +123,10 @@ impl<T> TensorMap<T> {
         unsafe {
             for i in 0..N {
                 let idx = *indices.get_unchecked(i);
-                *(*arr_ptr).get_mut(i).unwrap_unchecked() = ((&mut *slice).get_mut(idx.id).unwrap_unchecked()).as_mut().unwrap();
+                *(*arr_ptr).get_mut(i).unwrap_unchecked() =
+                    ((&mut *slice).get_mut(idx.id).unwrap_unchecked())
+                        .as_mut()
+                        .unwrap();
             }
             Some(arr.assume_init())
         }

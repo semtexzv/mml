@@ -1,13 +1,14 @@
-
-// TODO, how to ensure buffer safety
-
-use std::ops::{Index, IndexMut};
+use std::borrow::Cow;
+use std::cmp::max;
+use std::collections::HashMap;
+use std::hash::Hash;
+use crate::eval::Evaluator;
+use crate::graph::CGraph;
+use crate::tmap::TensorMap;
+use crate::{prod, sprod, TOp, Tensor, VKind, B, F, H, W, strd};
 use cblas::{Layout, Transpose};
 use rand::distributions::Distribution;
-use crate::graph::CGraph;
-use crate::{B, F, H, prod, sprod, Tensor, TOp, VKind, W};
-use crate::eval::Evaluator;
-use crate::tmap::TensorMap;
+use std::ops::{Index, IndexMut};
 
 #[derive(Debug)]
 pub struct BData {
@@ -15,53 +16,80 @@ pub struct BData {
     buf: Vec<f32>,
 }
 
-#[derive(Debug, )]
+#[derive(Debug)]
 pub struct CPU {
     epoch: usize,
-    bufs: TensorMap<BData>,
+
+    buf: TensorMap<BData>,
 }
 
 impl Index<Tensor> for CPU {
     type Output = BData;
 
     fn index(&self, index: Tensor) -> &Self::Output {
-        &self.bufs[index]
+        &self.buf[index]
     }
 }
 
 impl IndexMut<Tensor> for CPU {
     fn index_mut(&mut self, index: Tensor) -> &mut Self::Output {
-        &mut self.bufs[index]
+        &mut self.buf[index]
     }
 }
 
 impl Evaluator for CPU {
-
     fn step(&mut self) {
         self.epoch += 1;
     }
-    fn set_value(&mut self, g: &CGraph, ten: Tensor, val: &[f32]) {
+
+    fn write(&mut self, g: &CGraph, ten: Tensor, val: &[f32]) {
+        let blen = prod(g[ten].sh);
         assert_eq!(prod(g[ten].sh), val.len(), "provided data has wrong size");
-        let e = self.bufs.entry(ten)
-            .get_or_insert_with(|| BData {
-                epoch: self.epoch,
-                buf: vec![],
-            });
-        e.buf = val.to_vec();
+        let e = self.buf.entry(ten).get_or_insert_with(|| BData {
+            epoch: self.epoch,
+            buf: vec![0.0; blen],
+        });
+        e.buf.iter_mut().zip(val.iter()).for_each(|(d, s)| *d = *s);
         e.epoch = self.epoch;
     }
-    fn get_value(&self, ten: Tensor) -> &[f32] {
-        self.bufs.get(ten).unwrap().buf.as_slice()
+
+    fn read(&self, _: &CGraph, ten: Tensor) -> Cow<[f32]> {
+        Cow::Borrowed(self.buf.get(ten).unwrap().buf.as_slice())
     }
 
-    fn evaluate(&mut self, g: &CGraph, ten: Tensor) {
-        if self.bufs.get(ten).map(|s| s.epoch).unwrap_or_default() == self.epoch {
+    fn eval(&mut self, g: &CGraph, ten: Tensor) {
+        if self.buf.get(ten).map(|s| s.epoch).unwrap_or_default() == self.epoch {
             return;
         }
 
-        let srcs = g[ten].sc.clone();
+        // find topological order among unevaluated nodes.
+        // Then for each node
+        // if dep == 0: Schedule it
+        // Once finished, go through all dependant nodes, decrease dep
+        // If dep == 0; schedule
+
+        let mut vis = TensorMap::default();
+        let mut dep = HashMap::default();
+
+        fn traverse(g: &CGraph, e: &CPU, t: Tensor, vis: &mut TensorMap<()>, dep: &mut HashMap<Tensor, usize>) {
+            vis.set(t, ());
+            let mut cnt = 0;
+            for s in g[t].src.clone() {
+                if !(e.buf.get(s).map(|s| s.epoch).unwrap_or_default() == e.epoch) {
+                    cnt += 1;
+                }
+                if !vis.has(s) {
+                    traverse(g, e, s, vis, dep);
+                }
+            }
+            dep.insert(t, cnt);
+        }
+        traverse(g, self, ten, &mut vis, &mut dep);
+
+        let srcs = g[ten].src.clone();
+
         for s in &srcs {
-            self.evaluate(g, *s);
+            self.eval(g, *s);
             self[*s].epoch = self.epoch;
         }
 
@@ -69,15 +97,35 @@ impl Evaluator for CPU {
     }
 
     fn copy(&mut self, g: &CGraph, from: Tensor, to: Tensor) {
-        if !self.bufs.has(to) {
-            self.bufs.set(to, BData {
-                epoch: 0,
-                buf: vec![0.0; prod(g[to].sh)],
-            });
+        if !self.buf.has(to) {
+            self.buf.set(
+                to,
+                BData {
+                    epoch: 0,
+                    buf: vec![0.0; prod(g[to].sh)],
+                },
+            );
         }
+
         self[to].epoch = self.epoch;
-        let [from, to] = self.bufs.get_many_mut([from, to]).unwrap();
-        to.buf.iter_mut().zip(from.buf.iter()).for_each(|(d, s)| *d = *s);
+
+        let [from, to] = self.buf.get_many_mut([from, to]).unwrap();
+
+        to.buf
+            .iter_mut()
+            .zip(from.buf.iter())
+            .for_each(|(d, s)| *d = *s);
+    }
+
+    fn zero_grad(&mut self, g: &CGraph, params: &[Tensor]) {
+        for p in params {
+            if let Some(g) = g[*p].grad {
+                if let Some(g) = self.buf.get_mut(g) {
+                    g.buf.iter_mut().for_each(|v| *v = 0.0);
+                }
+            }
+
+        }
     }
 }
 
@@ -85,12 +133,9 @@ impl CPU {
     pub fn new() -> Self {
         Self {
             epoch: 1,
-            bufs: TensorMap::new(),
+            buf: TensorMap::new(),
         }
     }
-}
-
-impl CPU {
     fn perform_unop(d: &mut [f32], s: &[f32], op: fn(f32) -> f32) {
         for (d, s) in d.iter_mut().zip(s.iter()) {
             *d = op(*s);
@@ -107,128 +152,201 @@ impl CPU {
         }
     }
 
+    #[inline(never)]
     fn unop(&mut self, dst: Tensor, srcs: &[Tensor], op: fn(f32) -> f32) {
         assert_ne!(dst, srcs[0]);
         assert_eq!(srcs.len(), 1);
-        let [dst, src1] = self.bufs.get_many_mut([dst, srcs[0]]).unwrap();
+
+        let [dst, src1] = self.buf.get_many_mut([dst, srcs[0]]).unwrap();
         Self::perform_unop(&mut dst.buf, &src1.buf, op);
     }
-    fn binop(&mut self, dst: Tensor, srcs: &[Tensor], op: impl Fn(f32, f32) -> f32) {
+    #[inline(never)]
+    fn binop(&mut self, g: &CGraph, dst: Tensor, srcs: &[Tensor], op: impl Fn(f32, f32) -> f32) {
+        assert_ne!(dst, srcs[0]);
         assert_ne!(dst, srcs[1]);
         assert_eq!(srcs.len(), 2);
 
-        if dst == srcs[0] {
-            let [dst, src2] = self.bufs.get_many_mut([dst, srcs[1]]).unwrap();
-            Self::perform_inop(&mut dst.buf, &src2.buf, |dst, src| {
-                *dst = op(*dst, src)
-            })
-        } else {
-            let [dst, src1, src2] = self.bufs.get_many_mut([dst, srcs[0], srcs[1]]).unwrap();
-            Self::perform_binop(&mut dst.buf, &src1.buf, &src2.buf, op);
-        }
+        assert_eq!(g[srcs[0]].sh, g[srcs[1]].sh, "Op: {:?} ", g[dst]);
+
+        let [dst, src1, src2] = self.buf.get_many_mut([dst, srcs[0], srcs[1]]).unwrap();
+        Self::perform_binop(&mut dst.buf, &src1.buf, &src2.buf, op);
     }
+
+    #[inline(never)]
     fn inop(&mut self, dst: Tensor, src: Tensor, op: fn(&mut f32, f32)) {
-        let [dst, src] = self.bufs.get_many_mut([dst, src]).unwrap();
+        let [dst, src] = self.buf.get_many_mut([dst, src]).unwrap();
         Self::perform_inop(&mut dst.buf, &src.buf, op)
     }
 
+    #[inline(never)]
     fn do_eval(&mut self, g: &CGraph, dten: Tensor, srcs: &[Tensor], op: TOp) {
-        if !self.bufs.has(dten) {
-            self.bufs.set(dten, BData {
-                epoch: 0,
-                buf: vec![0.0; prod(g[dten].sh)],
-            });
+        if !self.buf.has(dten) {
+            self.buf.set(
+                dten,
+                BData {
+                    epoch: 0,
+                    buf: vec![0.0; prod(g[dten].sh)],
+                },
+            );
         }
 
         match &op {
             TOp::Value(value) => {
-                if self.bufs[dten].epoch > 0 {
-                    self.bufs[dten].epoch = self.epoch;
+                if self.buf[dten].epoch > 0 {
+                    self.buf[dten].epoch = self.epoch;
                     return;
                 }
 
                 match value {
                     VKind::Param => {
-                        let dist = rand::distributions::uniform::Uniform::new(-1.0, 1.0);
-                        self.bufs[dten].buf
+                        let dist = rand::distributions::Uniform::new(-0.01, 0.01);
+
+                        self.buf[dten]
+                            .buf
                             .iter_mut()
                             .zip(dist.sample_iter(rand::thread_rng()))
-                            .for_each(|(x, y)| *x = y);
+                            .for_each(|(x, y)| *x = y / prod(g[dten].sh) as f32);
                     }
-                    VKind::Zero => {
-                        self.set_value(g, dten, &[0.0])
-                    }
+                    VKind::Zero => self.write(g, dten, &[0.0]),
                     VKind::One => {
-                        self.set_value(g, dten, &vec![1.0; prod(g[dten].sh)]);
+                        self.write(g, dten, &vec![1.0; prod(g[dten].sh)]);
                     }
                     VKind::Input => {}
+                    VKind::Val(v) => {
+                        self.write(g, dten, &vec![*v as _; prod(g[dten].sh)]);
+                        println!("Writing val: {:?}", v);
+                    }
                 }
-                self.bufs[dten].epoch = self.epoch;
+                self.buf[dten].epoch = self.epoch;
             }
-            TOp::Neg => {
-                self.unop(dten, srcs, |a| -a)
-            }
-            TOp::Repeat { dim, .. } => {
-                assert_eq!(*dim, B);
-                assert_ne!(dten, g[dten].sc[0]);
+            TOp::Neg => self.unop(dten, srcs, |a| -a),
+            TOp::Relu => self.unop(dten, srcs, | a| f32::max(0.0, a)),
+            TOp::Exp =>  self.unop(dten, srcs, | a| f32::exp(a)),
+            TOp::Recip =>  self.unop(dten, srcs, | a| f32::clamp(f32::recip(a), f32::MIN, f32::MAX)),
+            TOp::Log =>  self.unop(dten, srcs, | a| f32::ln(a + 1e-8)),
+            TOp::Sqrt => self.unop(dten, srcs, | a| a.sqrt()),
+            TOp::Gtz =>  self.unop(dten, srcs, | a| f32::abs(f32::signum(a))),
 
-                let [dst, src] = self.bufs.get_many_mut([dten, g[dten].sc[0]]).unwrap();
-                for batch in 0..(g[dten].sh[B]) {
-                    let product = sprod(&g[dten].sh[B + 1..]);
-                    for i in 0..product {
-                        dst.buf[batch * product + i] = src.buf[i];
+            TOp::Repeat { dim, .. } => {
+                let sten = g[dten].src[0];
+                assert_ne!(dten, sten);
+
+                let ssh = g[sten].sh;
+                let str = strd(ssh);
+
+                let dsh = g[dten].sh;
+                let dtr= strd(dsh);
+
+                let [dst, src] = self.buf.get_many_mut([dten, g[dten].src[0]]).unwrap();
+                let sbuf = &src.buf;
+                let dbuf = &mut dst.buf;
+
+                for batch in 0 .. dsh[B] {
+                    for feature in 0 .. dsh[F] {
+                        for row in 0 .. dsh[H] {
+                            for col in 0 .. dsh[W] {
+                                let didx = batch * dtr[B] + feature * dtr[F] + row * dtr[H] + col * dtr[W];
+                                let sidx = batch * str[B] + feature * str[F] + row * str[H] + col * str[W];
+                                let mut delem = &mut dbuf[didx];
+                                let mut selem = &sbuf[sidx];
+                                *delem = *selem;
+                            }
+                        }
                     }
                 }
             }
             TOp::SumReduce { dim } => {
-                assert_eq!(*dim, B);
-                assert_ne!(dten, g[dten].sc[0]);
-                let sten = g[dten].sc[0];
+                let sten = g[dten].src[0];
+                assert_ne!(dten, sten);
 
-                let [dst, src] = self.bufs.get_many_mut([dten, sten]).unwrap();
-                let product = sprod(&g[sten].sh[B + 1..]);
-                for i in 0..product {
-                    dst.buf[i] = src.buf[i];
+                let ssh = g[sten].sh;
+                let str = strd(ssh);
+
+                let dsh = g[dten].sh;
+                let dtr= strd(dsh);
+
+                let [dst, src] = self.buf.get_many_mut([dten, sten]).unwrap();
+
+                let sbuf = &src.buf;
+                let dbuf = &mut dst.buf;
+                for batch in 0 .. dsh[B] {
+                    for feature in 0 .. dsh[F] {
+                        for row in 0..dsh[H] {
+                            for col in 0..dsh[W] {
+                                let didx = batch * dtr[B] + feature * dtr[F] + row * dtr[H] + col * dtr[W];
+                                let mut delem = &mut dbuf[didx];
+                                *delem = 0.0;
+                            }
+                        }
+                    }
                 }
-                for batch in 1..(g[sten].sh[B]) {
-                    for i in 0..product {
-                        dst.buf[i] += src.buf[batch * product + i];
+
+                for batch in 0 .. ssh[B] {
+                    for feature in 0 .. ssh[F] {
+                        for row in 0 .. ssh[H] {
+                            for col in 0 .. ssh[W] {
+                                let didx = batch * dtr[B] + feature * dtr[F] + row * dtr[H] + col * dtr[W];
+                                let sidx = batch * str[B] + feature * str[F] + row * str[H] + col * str[W];
+                                let mut delem = &mut dbuf[didx];
+                                let mut selem = &sbuf[sidx];
+                                *delem += *selem;
+                            }
+                        }
                     }
                 }
             }
+
             TOp::MaxReduce { dim } => {
-                assert_eq!(*dim, B);
-                assert_ne!(dten, g[dten].sc[0]);
+                let sten = g[dten].src[0];
+                assert_ne!(dten, sten);
 
-                let sten = g[dten].sc[0];
+                let ssh = g[sten].sh;
+                let str = strd(ssh);
 
-                let [dst, src] = self.bufs.get_many_mut([dten, sten]).unwrap();
-                let product = sprod(&g[sten].sh[B + 1..]);
-                for i in 0..product {
-                    dst.buf[i] = src.buf[i];
+                let dsh = g[dten].sh;
+                let dtr= strd(dsh);
+
+                let [dst, src] = self.buf.get_many_mut([dten, sten]).unwrap();
+
+                let sbuf = &src.buf;
+                let dbuf = &mut dst.buf;
+
+                for batch in 0 .. dsh[B] {
+                    for feature in 0 .. dsh[F] {
+                        for row in 0 .. dsh[H] {
+                            for col in 0 .. dsh[W] {
+                                let didx = batch * dtr[B] + feature * dtr[F] + row * dtr[H] + col * dtr[W];
+                                let sidx = batch * str[B] + feature * str[F] + row * str[H] + col * str[W];
+                                let mut delem = &mut dbuf[didx];
+                                let mut selem = &sbuf[sidx];
+
+                                *delem = *selem;
+                            }
+                        }
+                    }
                 }
 
-                for batch in 1..(g[sten].sh[B]) {
-                    for i in 0..product {
-                        dst.buf[i] = f32::max(src.buf[i], src.buf[batch * product + i]);
+                for batch in 0 .. ssh[B] {
+                    for feature in 0 .. ssh[F] {
+                        for row in 0 .. ssh[H] {
+                            for col in 0 .. ssh[W] {
+                                let didx = batch * dtr[B] + feature * dtr[F] + row * dtr[H] + col * dtr[W];
+                                let sidx = batch * str[B] + feature * str[F] + row * str[H] + col * str[W];
+                                let mut delem = &mut dbuf[didx];
+                                let mut selem = &sbuf[sidx];
+                                *delem = f32::max(*delem, *selem);
+                            }
+                        }
                     }
                 }
             }
-            TOp::Prod => {
-                if srcs.len() == 2 {
-                    self.binop(dten, srcs, |a, b| a * b);
-                } else {
-                    panic!()
-                    // self[dten].buf.iter_mut().for_each(|v| *v = 1.0);
-                    //
-                    // for s in srcs {
-                    //     self.inop(dten, *s, |d, s| *d *= s);
-                    // }
-                }
-            }
+
+            TOp::Eq => self.binop(g, dten, srcs, |a, b| if f32::eq(&a, &b) { 1.0 } else { 0.0 }),
+            TOp::Pow => self.binop(g, dten, srcs, |a, b| a.powf(b)),
+            TOp::Prod => self.binop(g, dten, srcs, |a, b| a * b),
             TOp::Sum => {
                 if srcs.len() == 2 {
-                    self.binop(dten, srcs, |a, b| a + b);
+                    self.binop(g, dten, srcs, |a, b| a + b);
                 } else {
                     self[dten].buf.iter_mut().for_each(|v| *v = 0.0);
 
@@ -238,47 +356,55 @@ impl CPU {
                 }
             }
 
-            TOp::MatMul => {
-                assert_ne!(dten, g[dten].sc[0]);
-                assert_ne!(dten, g[dten].sc[1]);
-                let sten1 = g[dten].sc[0];
-                let sten2 = g[dten].sc[1];
+
+            TOp::MatMul { ta, tb } => {
+                assert_ne!(dten, g[dten].src[0]);
+                assert_ne!(dten, g[dten].src[1]);
+
+                let sten1 = g[dten].src[0];
+                let sten2 = g[dten].src[1];
 
                 let dsh = g[dten].sh;
+                let dstrd = strd(dsh);
                 let sh1 = g[sten1].sh;
+                let s1str = strd(sh1);
                 let sh2 = g[sten2].sh;
+                let s2str = strd(sh2);
 
-                assert_eq!(g[sten1].sh[B], 1);
-                assert_eq!(g[sten2].sh[B], 1);
+                assert!(sh1[B] == 1 || sh2[B] == 1 || sh1[B] == sh2[B]);
+                assert_eq!(dsh[B], max(sh1[B], sh2[B]));
 
                 assert_eq!(g[sten1].sh[F], 1);
                 assert_eq!(g[sten2].sh[F], 1);
 
-                assert_eq!(sh1[W], sh2[H]);
+                let [dst, src1, src2] = self.buf.get_many_mut([dten, sten1, sten2]).unwrap();
 
-                let [dst, src1, src2] = self.bufs.get_many_mut([dten, sten1, sten2]).unwrap();
+                for b0 in  0 .. max(g[sten1].sh[B], g[sten2].sh[B]) {
+                    let abuf = &src1.buf.as_slice()[s1str[B] * b0 .. ];
+                    let bbuf = &src2.buf.as_slice()[s2str[B] * b0 .. ];
+                    let dbuf = &mut dst.buf.as_mut_slice()[dstrd[B] * b0 .. ];
 
-                unsafe {
-                    cblas::sgemm(
-                        Layout::RowMajor,
-                        Transpose::None,
-                        Transpose::None,
-                        sh1[H] as _,
-                        sh2[W] as _,
-                        sh2[H] as _,
-                        1.0,
-                        src1.buf.as_slice(),
-                        sh1[W] as _,
-                        src2.buf.as_slice(),
-                        sh2[W] as _,
-                        0.0,
-                        dst.buf.as_mut_slice(),
-                        dsh[W] as _,
-                    );
+                    unsafe {
+                        cblas::sgemm(
+                            Layout::RowMajor,
+                            if *ta { Transpose::Ordinary } else { Transpose::None },
+                            if *tb { Transpose::Ordinary } else { Transpose::None },
+                            if !*ta { sh1[H] } else { sh1[W] } as _,
+                            if !*tb { sh2[W] } else { sh2[H] } as _,
+                            if !*tb { sh2[H] } else { sh2[W] } as _,
+                            1.0,
+                            abuf,
+                            sh1[W] as _,
+                            bbuf,
+                            sh2[W] as _,
+                            0.0,
+                            dbuf,
+                            dsh[W] as _,
+                        );
+                    }
                 }
             }
             op => unimplemented!("{:?}", op),
         }
     }
-
 }
