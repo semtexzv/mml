@@ -4,7 +4,7 @@ use crate::tmap::TensorMap;
 use crate::{Shape, TData, TOp, Tensor, VKind, B, F, H, W, eval};
 use smallvec::smallvec;
 use std::cmp::max;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::mem::take;
 use std::ops::{Deref, Index, IndexMut};
 use std::sync::Arc;

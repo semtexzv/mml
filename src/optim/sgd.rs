@@ -1,4 +1,4 @@
-use crate::eval::{Evaluator, CPU};
+use crate::eval::Evaluator;
 use crate::graph::CGraph;
 use crate::optim::Optimizer;
 use crate::tmap::TensorMap;

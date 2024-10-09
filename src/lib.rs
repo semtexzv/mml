@@ -4,10 +4,7 @@ pub mod graph;
 pub mod optim;
 pub(crate) mod tmap;
 pub use tmap::Tensor;
-use crate::optim::Optimizer;
 use smallvec::SmallVec;
-use std::borrow::Borrow;
-use std::ops::{FnOnce, Index, IndexMut};
 use std::sync::Arc;
 
 
@@ -36,7 +33,7 @@ pub fn prod(s: Shape) -> usize {
 ///
 /// NOTE: dimensions of size 1 have stride of 0 to allow for broadcasted access
 pub fn strd(s: Shape) -> [usize; DIMS] {
-    let mut tmp =  [
+    let tmp =  [
         sprod(&s[1..]),
         sprod(&s[2..]),
         sprod(&s[3..]),

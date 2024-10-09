@@ -1,7 +1,7 @@
-use crate::eval::{CPU, Evaluator};
+use crate::eval::Evaluator;
 use crate::graph::CGraph;
 use crate::optim::Optimizer;
-use crate::{Tensor, W};
+use crate::Tensor;
 use crate::tmap::TensorMap;
 
 

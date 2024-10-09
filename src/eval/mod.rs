@@ -9,7 +9,7 @@ mod mps;
 pub use mps::MPS;
 
 use crate::graph::CGraph;
-use crate::{TOp, Tensor};
+use crate::Tensor;
 
 /// Core trait for performing actual computation.
 ///

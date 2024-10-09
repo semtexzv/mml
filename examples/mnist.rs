@@ -1,6 +1,6 @@
 use mml::eval::Evaluator;
 use mml::optim::{AdamParams, Optimizer};
-use mml::{eval, graph, optim, Tensor, W};
+use mml::{eval, graph, optim, W};
 
 const PIXELS: usize = 28 * 28;
 const CLASSES: usize = 10;

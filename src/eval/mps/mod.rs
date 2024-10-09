@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use crate::graph::CGraph;
 use crate::tmap::TensorMap;
-use crate::{prod, TOp, Tensor};
+use crate::{prod, Tensor};
 use metal::{Buffer, CommandQueue, CompileOptions, Device, Library, MTLResourceOptions};
 use crate::eval::Evaluator;
 

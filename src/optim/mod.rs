@@ -4,7 +4,7 @@ mod adam;
 pub use sgd::SGD;
 pub use adam::{Adam, AdamParams};
 
-use crate::eval::{Evaluator, CPU};
+use crate::eval::Evaluator;
 use crate::graph::CGraph;
 use crate::Tensor;
 

@@ -1,11 +1,10 @@
 use std::borrow::Cow;
 use std::cmp::max;
 use std::collections::HashMap;
-use std::hash::Hash;
 use crate::eval::Evaluator;
 use crate::graph::CGraph;
 use crate::tmap::TensorMap;
-use crate::{prod, sprod, TOp, Tensor, VKind, B, F, H, W, strd};
+use crate::{prod, TOp, Tensor, VKind, B, F, H, W, strd};
 use cblas::{Layout, Transpose};
 use rand::distributions::Distribution;
 use std::ops::{Index, IndexMut};
@@ -222,12 +221,12 @@ impl CPU {
             TOp::Neg => self.unop(dten, srcs, |a| -a),
             TOp::Relu => self.unop(dten, srcs, | a| f32::max(0.0, a)),
             TOp::Exp =>  self.unop(dten, srcs, | a| f32::exp(a)),
-            TOp::Recip =>  self.unop(dten, srcs, | a| f32::clamp(f32::recip(a), f32::MIN, f32::MAX)),
+            TOp::Recip => self.unop(dten, srcs, | a| f32::clamp(f32::recip(a), f32::MIN, f32::MAX)),
             TOp::Log =>  self.unop(dten, srcs, | a| f32::ln(a + 1e-8)),
-            TOp::Sqrt => self.unop(dten, srcs, | a| a.sqrt()),
-            TOp::Gtz =>  self.unop(dten, srcs, | a| f32::abs(f32::signum(a))),
+            TOp::Sqrt => self.unop(dten, srcs, | a| f32::sqrt(a)),
+            TOp::Gtz =>  self.unop(dten, srcs, | a| if a > 0.0 { 1.0 } else { 0.0 }),
 
-            TOp::Repeat { dim, .. } => {
+            TOp::Repeat {  .. } => {
                 let sten = g[dten].src[0];
                 assert_ne!(dten, sten);
 
@@ -247,8 +246,8 @@ impl CPU {
                             for col in 0 .. dsh[W] {
                                 let didx = batch * dtr[B] + feature * dtr[F] + row * dtr[H] + col * dtr[W];
                                 let sidx = batch * str[B] + feature * str[F] + row * str[H] + col * str[W];
-                                let mut delem = &mut dbuf[didx];
-                                let mut selem = &sbuf[sidx];
+                                let delem = &mut dbuf[didx];
+                                let selem = &sbuf[sidx];
                                 *delem = *selem;
                             }
                         }
@@ -274,7 +273,7 @@ impl CPU {
                         for row in 0..dsh[H] {
                             for col in 0..dsh[W] {
                                 let didx = batch * dtr[B] + feature * dtr[F] + row * dtr[H] + col * dtr[W];
-                                let mut delem = &mut dbuf[didx];
+                                let delem = &mut dbuf[didx];
                                 *delem = 0.0;
                             }
                         }
@@ -287,8 +286,8 @@ impl CPU {
                             for col in 0 .. ssh[W] {
                                 let didx = batch * dtr[B] + feature * dtr[F] + row * dtr[H] + col * dtr[W];
                                 let sidx = batch * str[B] + feature * str[F] + row * str[H] + col * str[W];
-                                let mut delem = &mut dbuf[didx];
-                                let mut selem = &sbuf[sidx];
+                                let delem = &mut dbuf[didx];
+                                let selem = &sbuf[sidx];
                                 *delem += *selem;
                             }
                         }
@@ -317,8 +316,8 @@ impl CPU {
                             for col in 0 .. dsh[W] {
                                 let didx = batch * dtr[B] + feature * dtr[F] + row * dtr[H] + col * dtr[W];
                                 let sidx = batch * str[B] + feature * str[F] + row * str[H] + col * str[W];
-                                let mut delem = &mut dbuf[didx];
-                                let mut selem = &sbuf[sidx];
+                                let delem = &mut dbuf[didx];
+                                let selem = &sbuf[sidx];
 
                                 *delem = *selem;
                             }
@@ -332,8 +331,8 @@ impl CPU {
                             for col in 0 .. ssh[W] {
                                 let didx = batch * dtr[B] + feature * dtr[F] + row * dtr[H] + col * dtr[W];
                                 let sidx = batch * str[B] + feature * str[F] + row * str[H] + col * str[W];
-                                let mut delem = &mut dbuf[didx];
-                                let mut selem = &sbuf[sidx];
+                                let delem = &mut dbuf[didx];
+                                let selem = &sbuf[sidx];
                                 *delem = f32::max(*delem, *selem);
                             }
                         }
