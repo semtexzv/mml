@@ -123,7 +123,6 @@ impl Evaluator for CPU {
                     g.buf.iter_mut().for_each(|v| *v = 0.0);
                 }
             }
-
         }
     }
 }
@@ -189,7 +188,7 @@ impl CPU {
             );
         }
 
-        match &op {
+        match op {
             TOp::Value(value) => {
                 if self.buf[dten].epoch > 0 {
                     self.buf[dten].epoch = self.epoch;
@@ -212,21 +211,65 @@ impl CPU {
                     }
                     VKind::Input => {}
                     VKind::Val(v) => {
-                        self.write(g, dten, &vec![*v as _; prod(g[dten].sh)]);
+                        self.write(g, dten, &vec![v as _; prod(g[dten].sh)]);
                         println!("Writing val: {:?}", v);
                     }
                 }
                 self.buf[dten].epoch = self.epoch;
             }
             TOp::Neg => self.unop(dten, srcs, |a| -a),
-            TOp::Relu => self.unop(dten, srcs, | a| f32::max(0.0, a)),
-            TOp::Exp =>  self.unop(dten, srcs, | a| f32::exp(a)),
-            TOp::Recip => self.unop(dten, srcs, | a| f32::clamp(f32::recip(a), f32::MIN, f32::MAX)),
-            TOp::Log =>  self.unop(dten, srcs, | a| f32::ln(a + 1e-8)),
-            TOp::Sqrt => self.unop(dten, srcs, | a| f32::sqrt(a)),
-            TOp::Gtz =>  self.unop(dten, srcs, | a| if a > 0.0 { 1.0 } else { 0.0 }),
+            TOp::Relu => self.unop(dten, srcs, |a| f32::max(0.0, a)),
+            TOp::Exp => self.unop(dten, srcs, |a| f32::exp(a)),
+            TOp::Recip => self.unop(dten, srcs, |a| f32::clamp(f32::recip(a), f32::MIN, f32::MAX)),
+            TOp::Log => self.unop(dten, srcs, |a| f32::ln(a + 1e-8)),
+            TOp::Sqrt => self.unop(dten, srcs, |a| f32::sqrt(a)),
+            TOp::Gtz => self.unop(dten, srcs, |a| if a > 0.0 { 1.0 } else { 0.0 }),
+            TOp::SoftMax { dim } => {
+                let sten = srcs[0];
+                assert_ne!(dten, sten);
 
-            TOp::Repeat {  .. } => {
+                let s_sh = g[sten].sh;
+                let d_sh = g[dten].sh;
+
+                let [dst, src] = self.buf.get_many_mut([dten, sten]).unwrap();
+
+                let sbuf = &src.buf;
+                let dbuf = &mut dst.buf;
+
+                // Number of elements in the tensor
+                let total_elems = prod(d_sh);
+
+                // Compute the size and stride for the softmax dimension
+                let dim_size = s_sh[dim];
+                let outer_elems = total_elems / dim_size;
+
+                // Iterate over each outer dimension
+                for outer_idx in 0..outer_elems {
+                    let base_offset = outer_idx * dim_size;
+
+                    // Find the maximum value for numerical stability
+                    let mut max_val = std::f32::NEG_INFINITY;
+                    for i in 0..dim_size {
+                        let idx = base_offset + i;
+                        max_val = max_val.max(sbuf[idx]);
+                    }
+
+
+                    // For softmax
+                    let mut sum_exp = 0.0;
+                    for i in 0..dim_size {
+                        let idx = base_offset + i;
+                        let val = (sbuf[idx] - max_val).exp();
+                        dbuf[idx] = val;
+                        sum_exp += val;
+                    }
+                    for i in 0..dim_size {
+                        let idx = base_offset + i;
+                        dbuf[idx] /= sum_exp;
+                    }
+                }
+            }
+            TOp::Repeat { .. } => {
                 let sten = g[dten].src[0];
                 assert_ne!(dten, sten);
 
@@ -234,16 +277,16 @@ impl CPU {
                 let str = strd(ssh);
 
                 let dsh = g[dten].sh;
-                let dtr= strd(dsh);
+                let dtr = strd(dsh);
 
                 let [dst, src] = self.buf.get_many_mut([dten, g[dten].src[0]]).unwrap();
                 let sbuf = &src.buf;
                 let dbuf = &mut dst.buf;
 
-                for batch in 0 .. dsh[B] {
-                    for feature in 0 .. dsh[F] {
-                        for row in 0 .. dsh[H] {
-                            for col in 0 .. dsh[W] {
+                for batch in 0..dsh[B] {
+                    for feature in 0..dsh[F] {
+                        for row in 0..dsh[H] {
+                            for col in 0..dsh[W] {
                                 let didx = batch * dtr[B] + feature * dtr[F] + row * dtr[H] + col * dtr[W];
                                 let sidx = batch * str[B] + feature * str[F] + row * str[H] + col * str[W];
                                 let delem = &mut dbuf[didx];
@@ -262,14 +305,14 @@ impl CPU {
                 let str = strd(ssh);
 
                 let dsh = g[dten].sh;
-                let dtr= strd(dsh);
+                let dtr = strd(dsh);
 
                 let [dst, src] = self.buf.get_many_mut([dten, sten]).unwrap();
 
                 let sbuf = &src.buf;
                 let dbuf = &mut dst.buf;
-                for batch in 0 .. dsh[B] {
-                    for feature in 0 .. dsh[F] {
+                for batch in 0..dsh[B] {
+                    for feature in 0..dsh[F] {
                         for row in 0..dsh[H] {
                             for col in 0..dsh[W] {
                                 let didx = batch * dtr[B] + feature * dtr[F] + row * dtr[H] + col * dtr[W];
@@ -280,10 +323,10 @@ impl CPU {
                     }
                 }
 
-                for batch in 0 .. ssh[B] {
-                    for feature in 0 .. ssh[F] {
-                        for row in 0 .. ssh[H] {
-                            for col in 0 .. ssh[W] {
+                for batch in 0..ssh[B] {
+                    for feature in 0..ssh[F] {
+                        for row in 0..ssh[H] {
+                            for col in 0..ssh[W] {
                                 let didx = batch * dtr[B] + feature * dtr[F] + row * dtr[H] + col * dtr[W];
                                 let sidx = batch * str[B] + feature * str[F] + row * str[H] + col * str[W];
                                 let delem = &mut dbuf[didx];
@@ -303,17 +346,17 @@ impl CPU {
                 let str = strd(ssh);
 
                 let dsh = g[dten].sh;
-                let dtr= strd(dsh);
+                let dtr = strd(dsh);
 
                 let [dst, src] = self.buf.get_many_mut([dten, sten]).unwrap();
 
                 let sbuf = &src.buf;
                 let dbuf = &mut dst.buf;
 
-                for batch in 0 .. dsh[B] {
-                    for feature in 0 .. dsh[F] {
-                        for row in 0 .. dsh[H] {
-                            for col in 0 .. dsh[W] {
+                for batch in 0..dsh[B] {
+                    for feature in 0..dsh[F] {
+                        for row in 0..dsh[H] {
+                            for col in 0..dsh[W] {
                                 let didx = batch * dtr[B] + feature * dtr[F] + row * dtr[H] + col * dtr[W];
                                 let sidx = batch * str[B] + feature * str[F] + row * str[H] + col * str[W];
                                 let delem = &mut dbuf[didx];
@@ -325,10 +368,10 @@ impl CPU {
                     }
                 }
 
-                for batch in 0 .. ssh[B] {
-                    for feature in 0 .. ssh[F] {
-                        for row in 0 .. ssh[H] {
-                            for col in 0 .. ssh[W] {
+                for batch in 0..ssh[B] {
+                    for feature in 0..ssh[F] {
+                        for row in 0..ssh[H] {
+                            for col in 0..ssh[W] {
                                 let didx = batch * dtr[B] + feature * dtr[F] + row * dtr[H] + col * dtr[W];
                                 let sidx = batch * str[B] + feature * str[F] + row * str[H] + col * str[W];
                                 let delem = &mut dbuf[didx];
@@ -355,7 +398,6 @@ impl CPU {
                 }
             }
 
-
             TOp::MatMul { ta, tb } => {
                 assert_ne!(dten, g[dten].src[0]);
                 assert_ne!(dten, g[dten].src[1]);
@@ -378,19 +420,19 @@ impl CPU {
 
                 let [dst, src1, src2] = self.buf.get_many_mut([dten, sten1, sten2]).unwrap();
 
-                for b0 in  0 .. max(g[sten1].sh[B], g[sten2].sh[B]) {
-                    let abuf = &src1.buf.as_slice()[s1str[B] * b0 .. ];
-                    let bbuf = &src2.buf.as_slice()[s2str[B] * b0 .. ];
-                    let dbuf = &mut dst.buf.as_mut_slice()[dstrd[B] * b0 .. ];
+                for b0 in 0..max(g[sten1].sh[B], g[sten2].sh[B]) {
+                    let abuf = &src1.buf.as_slice()[s1str[B] * b0..];
+                    let bbuf = &src2.buf.as_slice()[s2str[B] * b0..];
+                    let dbuf = &mut dst.buf.as_mut_slice()[dstrd[B] * b0..];
 
                     unsafe {
                         cblas::sgemm(
                             Layout::RowMajor,
-                            if *ta { Transpose::Ordinary } else { Transpose::None },
-                            if *tb { Transpose::Ordinary } else { Transpose::None },
-                            if !*ta { sh1[H] } else { sh1[W] } as _,
-                            if !*tb { sh2[W] } else { sh2[H] } as _,
-                            if !*tb { sh2[H] } else { sh2[W] } as _,
+                            if ta { Transpose::Ordinary } else { Transpose::None },
+                            if tb { Transpose::Ordinary } else { Transpose::None },
+                            if !ta { sh1[H] } else { sh1[W] } as _,
+                            if !tb { sh2[W] } else { sh2[H] } as _,
+                            if !tb { sh2[H] } else { sh2[W] } as _,
                             1.0,
                             abuf,
                             sh1[W] as _,

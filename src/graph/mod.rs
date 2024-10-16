@@ -1,11 +1,9 @@
-mod gopt;
-
 use crate::tmap::TensorMap;
 use crate::{Shape, TData, TOp, Tensor, VKind, B, F, H, W, eval};
 use smallvec::smallvec;
 use std::cmp::max;
 use std::collections::BTreeMap;
-use std::mem::take;
+use std::mem::{replace, take};
 use std::ops::{Deref, Index, IndexMut};
 use std::sync::Arc;
 
@@ -19,7 +17,8 @@ pub type BackOp = fn(g: &mut CGraph, out: Tensor, outgrad: Tensor);
 /// About buffers and evaluation.
 #[derive(Default, Debug)]
 pub struct CGraph {
-    is_back: bool,
+    // Record backwards passes
+    grad: bool,
     // Current scope
     scp: String,
     // Tensor data
@@ -32,7 +31,7 @@ pub struct CGraph {
 
 pub struct Scoped<'a> {
     g: &'a mut CGraph,
-    s: &'a str
+    s: &'a str,
 }
 
 impl Index<Tensor> for CGraph {
@@ -59,7 +58,13 @@ impl IndexMut<Tensor> for CGraph {
 
 impl CGraph {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            grad: true,
+            scp: "".to_string(),
+            ten: vec![],
+            bck: Default::default(),
+            nme: Default::default(),
+        }
     }
     pub fn find(&self, named: &str) -> Tensor {
         self.nme[named]
@@ -76,6 +81,13 @@ impl CGraph {
             self.scp.as_mut_vec().set_len(plen);
         }
         ret
+    }
+
+    /// Temporarily disable backward pass recording within a closure
+    pub fn nograd<F: FnOnce(&mut Self)>(&mut self, f: F) {
+        let prev_grad = replace(&mut self.grad, false);
+        f(self);
+        self.grad = prev_grad;
     }
 
     pub fn shape(&mut self, t: Tensor) -> Shape {
@@ -201,7 +213,8 @@ impl CGraph {
     }
 
     pub fn backward(&mut self, loss: Tensor) -> Vec<Tensor> {
-        self.is_back = true;
+        // Disable gradient recording when doing a backward pass
+        self.grad = false;
 
         if self[loss].grad.is_some() {
             panic!("Tensor {loss:?} already has backwards pass registered");
@@ -241,12 +254,12 @@ impl CGraph {
         }
 
         self.bck = bck;
-        self.is_back = false;
+        self.grad = true;
         out
     }
 
     pub(crate) fn register_backwards_op(&mut self, t: Tensor, op: BackOp) {
-        if !self.is_back && self[t].want_grad {
+        if self.grad && self[t].want_grad {
             self.bck.set(t, op);
         }
     }
@@ -317,7 +330,7 @@ impl CGraph {
 
             g.add_grad(src, grad);
         });
-        return t
+        return t;
     }
     pub fn broadcast_to(&mut self, shape: Shape, mut t: Tensor) -> Tensor {
         for dim in 0..4 {
@@ -497,10 +510,9 @@ impl CGraph {
             out = g.broadcast_to(g[src].sh, out);
             outgrad = g.broadcast_to(g[src].sh, outgrad);
 
-            let eqvl = g.eq(src, out);
+            let eqvl = g.equ(src, out);
             let grad = g.mul(eqvl, outgrad);
             g.add_grad(src, grad);
-
         });
 
         out
@@ -544,7 +556,7 @@ impl CGraph {
         self.add(t1, t2)
     }
 
-    pub fn eq(&mut self, a: Tensor, b: Tensor) -> Tensor {
+    pub fn equ(&mut self, a: Tensor, b: Tensor) -> Tensor {
         let out = self._binop(TOp::Eq, a, b);
         self.register_backwards_op(out, |g, out, outgrad| {
             panic!("No backwards op for eq");
@@ -584,6 +596,23 @@ impl CGraph {
         self.mul(t1, t2)
     }
 
+
+    pub fn softmax(&mut self, dim: usize, inp: Tensor) -> Tensor {
+        let out = self._unop(TOp::SoftMax { dim }, inp);
+        self.register_backwards_op(out, |g, out, outgrad| {
+            unimplemented!()
+        });
+        out
+    }
+
+    pub fn log_softmax(&mut self, dim: usize, inp: Tensor) -> Tensor {
+        let out = self._unop(TOp::LogSoftMax { dim }, inp);
+        self.register_backwards_op(out, |g, out, outgrad| {
+            unimplemented!()
+        });
+        out
+    }
+
     pub fn mul_mat(&mut self, a: Tensor, ta: bool, b: Tensor, tb: bool) -> Tensor {
         let sha = self[a].sh;
         let shb = self[b].sh;
@@ -615,7 +644,7 @@ impl CGraph {
 
         let sho = [max(sha[B], shb[B]), max(sha[F], shb[F]), out_h, out_w];
 
-        let out = self._binop_sh(TOp::MatMul{ ta, tb }, sho, a, b);
+        let out = self._binop_sh(TOp::MatMul { ta, tb }, sho, a, b);
 
         self.register_backwards_op(out, |g, out, outgrad| {
             let srcs = g[out].src.clone();
@@ -639,38 +668,6 @@ impl CGraph {
         });
         out
     }
-
-    pub fn log_softmax(&mut self, dim: usize, x: Tensor) -> Tensor {
-        let max = self.max_reduce(dim, x);
-        let max = self.broadcast_to(self[x].sh, max);
-
-        let elm = self.sub(x, max);
-
-        let exp = self.exp(elm);
-        let sum = self.sum_reduce(dim, exp);
-        let sum = self.log(sum);
-
-        let sum = self.broadcast_to(self[x].sh, sum);
-
-        let a = self.sub(x, sum);
-        self.sub(a, max)
-    }
-
-    pub fn softmax(&mut self, dim: usize, inp: Tensor) -> Tensor {
-        let max = self.max_reduce(dim, inp);
-        let max = self.broadcast_to(self[inp].sh, max);
-
-        let inp = self.sub(inp, max);
-
-        let exp = self.exp(inp);
-        let sum = self.sum_reduce(dim, exp);
-        let sum = self.broadcast_to(self[inp].sh, sum);
-        let eps = self.val_like(1e-8, sum);
-        let sum = self.add(sum, eps);
-
-        self.div(exp, sum)
-    }
-
 
     pub fn nll_loss(&mut self, inp: Tensor, tgt: Tensor) -> Tensor {
         let mul = self.mul(inp, tgt);

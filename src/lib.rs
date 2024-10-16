@@ -39,9 +39,6 @@ pub fn strd(s: Shape) -> [usize; DIMS] {
         sprod(&s[3..]),
         1
     ];
-    // for i in (0..=2).rev() {
-    //     tmp[i] *= tmp[i+1];
-    // }
     [
         if s[B] > 1 { tmp[B] } else { 0 },
         if s[F] > 1 { tmp[F] } else { 0 },
@@ -111,13 +108,8 @@ pub enum TOp {
         ta: bool,
         tb: bool,
     },
-
-    /// Transposed matmul y = a * b'
-    MatMulT,
-
     /// 2D convolution, 1st tensor is the image, 2nd is the filter
     Conv2D,
-
 
     /// Repeat tensor in the dimension `dim` `len` times
     Repeat {
@@ -134,6 +126,17 @@ pub enum TOp {
     SumReduce {
         dim: usize,
     },
+
+    /// Calculates softmax along a given dim, so that the slices along that dim sum to 1
+    SoftMax {
+        dim: usize,
+    },
+
+    /// Calculates logsoftmax along a given dim
+    LogSoftMax {
+        dim: usize,
+    },
+
     /// Concatenate tensors in `dim`, all other dims must be same
     Cat {
         dim: usize,
